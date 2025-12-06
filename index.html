@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Author Network Force Layout (D3.js)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- D3.js v7 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #0f1020;
+      --panel: #171828;
+      --text: #e6e6e6;
+      --muted: #a9a9a9;
+      --other: #A9A9A9;
+      --accent: #7aa2f7;
+      --accent2: #9ece6a;
+    }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 12px 16px; border-bottom: 1px solid #22263a; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    .container { display: grid; grid-template-columns: 320px 1fr; gap: 12px; padding: 12px; min-height: calc(100vh - 56px); }
+    .panel { background: var(--panel); border: 1px solid #22263a; border-radius: 10px; padding: 12px; }
+    .panel h2 { font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+    .control-group { margin-bottom: 12px; }
+    .control-group label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .control-group input[type="range"] { width: 100%; }
+    .legend { margin-top: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; }
+    .swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #111; }
+    #chart { position: relative; }
+    svg { width: 100%; height: calc(100vh - 120px); display: block; background: radial-gradient(1200px 700px at 40% 35%, #121431 0%, #0f1020 60%, #0b0c1a 100%); border-radius: 10px; }
+    .link { stroke: #5a5e80; stroke-opacity: 0.3; }
+    .node { stroke: #0b0c1a; stroke-width: 1px; cursor: pointer; }
+    .node.dimmed { opacity: 0.2; }
+    .tooltip { position: absolute; pointer-events: none; background: #0b0c1a; color: var(--text); border: 1px solid #22263a; border-radius: 8px; padding: 10px; font-size: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.35); opacity: 0; transform: translate(-50%, -120%); transition: opacity 120ms ease; max-width: 260px; z-index: 10; }
+    .tooltip .title { font-weight: 600; margin-bottom: 6px; color: var(--accent2); }
+    .tooltip .row { display: flex; justify-content: space-between; gap: 12px; margin: 2px 0; }
+    .note { font-size: 12px; color: var(--muted); }
+    .status { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #20233b; border: 1px solid #22263a; font-size: 11px; margin-left: 6px; color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Author network: Force layout (D3.js) <span class="badge">Req. 1–4</span></h1>
+    <div class="note">Data source: Scopus CSV (GitHub raw). Parsing authors, affiliations, countries from the provided file.</div>
+  </header>
+
+  <div class="container">
+    <div class="panel">
+      <h2>Simulation controls</h2>
+
+      <div class="control-group">
+        <label><span>Many-body charge</span><span id="chargeVal">-30</span></label>
+        <input id="charge" type="range" min="-200" max="50" step="1" value="-30" />
+      </div>
+
+      <div class="control-group">
+        <label><span>Collide radius factor</span><span id="collideVal">1.20</span></label>
+        <input id="collide" type="range" min="0.8" max="2.0" step="0.05" value="1.20" />
+      </div>
+
+      <div class="control-group">
+        <label><span>Link strength</span><span id="linkStrengthVal">0.70</span></label>
+        <input id="linkStrength" type="range" min="0.1" max="1.5" step="0.05" value="0.70" />
+      </div>
+
+      <div class="status" id="status">Loading CSV…</div>
+
+      <h2>Country legend (top 10)</h2>
+      <div class="legend" id="legend"></div>
+
+      <div class="note">Hover a node to highlight same-affiliation authors. Click a node for details.</div>
+    </div>
+
+    <div class="panel" id="chart">
+      <svg></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+  </div>
+
+  <script>
+    const CSV_URL = 'https://raw.githubusercontent.com/umassdgithub/DataViz-Fall2025/refs/heads/main/Week-8-ForceSimulator/data/data_scopus.csv';
+
+    // Columns in the provided CSV
+    const COL = {
+      year: 'Year',
+      eid: 'EID',
+      authors: 'Authors',
+      authorsAffils: 'Authors with affiliations'
+    };
+
+    const SIZE = { width: 1200, height: 740 };
+    const OTHER_COLOR = '#A9A9A9';
+    const NODE_RADIUS_RANGE = [3, 12];
+
+    const svg = d3.select('svg').attr('viewBox', [0, 0, SIZE.width, SIZE.height]);
+    const tooltip = d3.select('#tooltip');
+    const statusEl = d3.select('#status');
+    const legendEl = d3.select('#legend');
+
+    const chargeInput = d3.select('#charge');
+    const collideInput = d3.select('#collide');
+    const linkStrengthInput = d3.select('#linkStrength');
+
+    const chargeVal = d3.select('#chargeVal');
+    const collideVal = d3.select('#collideVal');
+    const linkStrengthVal = d3.select('#linkStrengthVal');
+
+    // Load CSV from GitHub raw
+    d3.csv(CSV_URL).then(raw => {
+      statusEl.text('Parsing and building network…');
+
+      // Filter: exclude rows missing Year, Authors, Authors with affiliations
+      const rows = raw.filter(d =>
+        hasValue(d[COL.year]) && hasValue(d[COL.authors]) && hasValue(d[COL.authorsAffils])
+      );
+
+      // Expand each row into per-author records, parsed from "Authors with affiliations"
+      // Each row contains multiple authors; we parse name, affiliation, country
+      const expanded = [];
+      rows.forEach(d => {
+        const eid = normalize(d[COL.eid]);
+        const year = normalize(d[COL.year]);
+        const blocks = splitAuthorsWithAffils(d[COL.authorsAffils]); // array of {name, affiliation, country}
+        blocks.forEach(b => {
+          expanded.push({
+            eid,
+            year,
+            name: b.name,
+            affiliation: b.affiliation,
+            country: b.country
+          });
+        });
+      });
+
+      // Nodes: unique authors by name+affiliation (author identity tied to current affiliation)
+      const authorKey = d => normalize(`${d.name}|${d.affiliation}`);
+      const byAuthor = d3.rollup(expanded, v => {
+        const sample = v[v.length - 1];
+        return {
+          id: authorKey(sample),
+          name: sample.name,
+          affiliation: sample.affiliation,
+          country: sample.country || 'Unknown',
+          count: v.length
+        };
+      }, authorKey);
+      const nodes = Array.from(byAuthor.values());
+
+      // Links: per publication (EID), connect all co-authors pairwise
+      const byPub = d3.group(expanded, d => d.eid);
+      const links = [];
+      for (const [eid, recs] of byPub) {
+        if (!hasValue(eid)) continue;
+        const uniqueAuthors = Array.from(new Set(recs.map(authorKey)));
+        for (let i = 0; i < uniqueAuthors.length; i++) {
+          for (let j = i + 1; j < uniqueAuthors.length; j++) {
+            links.push({ source: uniqueAuthors[i], target: uniqueAuthors[j], eid });
+          }
+        }
+      }
+
+      // Degree per node
+      const degreeMap = new Map();
+      links.forEach(l => {
+        degreeMap.set(l.source, (degreeMap.get(l.source) || 0) + 1);
+        degreeMap.set(l.target, (degreeMap.get(l.target) || 0) + 1);
+      });
+      nodes.forEach(n => n.degree = degreeMap.get(n.id) || 0);
+
+      // Hue channel: top 10 countries -> colored; others gray
+      const countryCounts = d3.rollup(nodes, v => v.length, d => d.country);
+      const topCountries = Array.from(countryCounts.entries())
+        .sort((a, b) => d3.descending(a[1], b[1]))
+        .slice(0, 10)
+        .map(d => d[0]);
+
+      const colorScale = d3.scaleOrdinal().domain(topCountries).range(d3.schemeTableau10);
+
+      // Legend
+      legendEl.html('');
+      topCountries.forEach(c => {
+        const item = legendEl.append('div').attr('class', 'legend-item');
+        item.append('div').attr('class', 'swatch').style('background', colorScale(c));
+        item.append('div').text(c);
+      });
+      const otherItem = legendEl.append('div').attr('class', 'legend-item');
+      otherItem.append('div').attr('class', 'swatch').style('background', OTHER_COLOR);
+      otherItem.append('div').text('Other');
+
+      // Radius scale by degree
+      const degExtent = d3.extent(nodes, d => d.degree);
+      const rScale = d3.scaleSqrt()
+        .domain(degExtent[0] === undefined ? [0, 0] : degExtent)
+        .range(NODE_RADIUS_RANGE);
+
+      // Forces
+      const linkForce = d3.forceLink(links).id(d => d.id).strength(+linkStrengthInput.node().value);
+      const simulation = d3.forceSimulation(nodes)
+        .force('link', linkForce)
+        .force('charge', d3.forceManyBody().strength(+chargeInput.node().value))
+        .force('center', d3.forceCenter(SIZE.width / 2, SIZE.height / 2))
+        .force('collide', d3.forceCollide().radius(d => rScale(d.degree) * +collideInput.node().value));
+
+      // Draw links
+      const link = svg.append('g')
+        .attr('stroke-width', 1)
+        .selectAll('line')
+        .data(links)
+        .join('line')
+        .attr('class', 'link');
+
+      // Draw nodes
+      const node = svg.append('g')
+        .selectAll('circle')
+        .data(nodes)
+        .join('circle')
+        .attr('class', 'node')
+        .attr('r', d => rScale(d.degree))
+        .attr('fill', d => topCountries.includes(d.country) ? colorScale(d.country) : OTHER_COLOR)
+        .on('mouseenter', handleMouseEnter)
+        .on('mouseleave', handleMouseLeave)
+        .on('click', handleClick)
+        .call(drag(simulation));
+
+      const label = svg.append('g')
+        .selectAll('text')
+        .data(nodes)
+        .join('text')
+        .text(d => d.name)
+        .attr('fill', '#c9cdf2')
+        .attr('font-size', '10px')
+        .attr('text-anchor', 'middle')
+        .attr('pointer-events', 'none')
+        .attr('opacity', 0.35);
+
+      simulation.on('tick', () => {
+        link
+          .attr('x1', d => d.source.x)
+          .attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x)
+          .attr('y2', d => d.target.y);
+        node
+          .attr('cx', d => d.x = clamp(d.x, 10, SIZE.width - 10))
+          .attr('cy', d => d.y = clamp(d.y, 10, SIZE.height - 10));
+        label
+          .attr('x', d => d.x)
+          .attr('y', d => d.y - (rScale(d.degree) + 6));
+      });
+
+      // UI controls
+      chargeInput.on('input', function() {
+        const val = +this.value;
+        chargeVal.text(val);
+        simulation.force('charge', d3.forceManyBody().strength(val));
+        simulation.alpha(0.7).restart();
+      });
+      collideInput.on('input', function() {
+        const val = +this.value;
+        collideVal.text(val.toFixed(2));
+        simulation.force('collide', d3.forceCollide().radius(d => rScale(d.degree) * val));
+        simulation.alpha(0.7).restart();
+      });
+      linkStrengthInput.on('input', function() {
+        const val = +this.value;
+        linkStrengthVal.text(val.toFixed(2));
+        linkForce.strength(val);
+        simulation.alpha(0.7).restart();
+      });
+
+      statusEl.text(`Loaded ${rows.length} records → ${nodes.length} authors, ${links.length} links.`);
+
+      // Interactions
+      function handleMouseEnter(event, d) {
+        const targetAffil = d.affiliation;
+        node.classed('dimmed', n => n.affiliation !== targetAffil);
+        label.attr('opacity', n => n.affiliation === targetAffil ? 0.85 : 0.1);
+        link.attr('stroke-opacity', l => {
+          const sAff = l.source.affiliation;
+          const tAff = l.target.affiliation;
+          return (sAff === targetAffil && tAff === targetAffil) ? 0.5 : 0.08;
+        });
+      }
+      function handleMouseLeave() {
+        node.classed('dimmed', false);
+        label.attr('opacity', 0.35);
+        link.attr('stroke-opacity', 0.3);
+        hideTooltip();
+      }
+      function handleClick(event, d) {
+        const [x, y] = d3.pointer(event, svg.node());
+        showTooltip(x, y, d);
+      }
+
+      function showTooltip(x, y, d) {
+        tooltip
+          .style('left', `${x}px`)
+          .style('top', `${y}px`)
+          .style('opacity', 1)
+          .html(`
+            <div class="title">${escapeHtml(d.name)}</div>
+            <div class="row"><span>Affiliation</span><span>${escapeHtml(d.affiliation)}</span></div>
+            <div class="row"><span>Country</span><span>${escapeHtml(d.country)}</span></div>
+            <div class="row"><span>Degree</span><span>${d.degree}</span></div>
+            <div class="row"><span>Records</span><span>${d.count}</span></div>
+          `);
+      }
+      function hideTooltip() { tooltip.style('opacity', 0); }
+
+      // Drag behavior
+      function drag(sim) {
+        function dragstarted(event, d) {
+          if (!event.active) sim.alphaTarget(0.3).restart();
+          d.fx = d.x; d.fy = d.y;
+        }
+        function dragged(event, d) { d.fx = event.x; d.fy = event.y; }
+        function dragended(event, d) {
+          if (!event.active) sim.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        }
+        return d3.drag().on('start', dragstarted).on('drag', dragged).on('end', dragended);
+      }
+
+      // Parsing helpers
+      function splitAuthorsWithAffils(s) {
+        if (!hasValue(s)) return [];
+        // Split by semicolons into author blocks; remove trailing commas
+        const blocks = s.split(';').map(x => x.trim()).filter(x => x.length > 0);
+        return blocks.map(block => {
+          // Example: "Zhang, Y., Department..., University..., Canada"
+          const parts = block.split(',').map(p => p.trim()).filter(p => p.length > 0);
+          const name = parts.length ? parts[0] : 'Unknown';
+          const country = parts.length ? parts[parts.length - 1] : 'Unknown';
+          const affiliation = parts.length > 2 ? parts.slice(1, parts.length - 1).join(', ') : (parts[1] || '');
+          return {
+            name,
+            affiliation: affiliation || 'Unknown',
+            country: country || 'Unknown'
+          };
+        });
+      }
+
+      function hasValue(v) {
+        if (v === undefined || v === null) return false;
+        const s = String(v).trim();
+        return s.length > 0 && !['null','na','undefined'].includes(s.toLowerCase());
+      }
+      function normalize(s) { return s == null ? '' : String(s).trim(); }
+      function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+      function escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+      }
+    }).catch(err => {
+      d3.select('#status').text('Error loading CSV. Check the URL and network access.');
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
